@@ -91,7 +91,7 @@
 
 #gets difference between value in 'date' column and current date
 #returns number of days which is added as a new column
-rule add_days_since_epi:
+rule add_days_and_weeks_since_epi:
     input:
         metadata = config["gisaid_meta"],
     output:
@@ -102,16 +102,19 @@ rule add_days_since_epi:
 
         date_format = "%Y-%m-%d"
 
-        df = pd.read_csv(input.metadata, sep=",")
+        df = pd.read_csv(input.metadata, sep="\t")
 
         df['date'] = pd.to_datetime(df['date'], format= date_format)
         df['epi'] = pd.to_datetime('2019-12-22', format= date_format)
         df['epi_day'] = df['date'] - df['epi']
         df['epi_day'] = [df['epi_day'][i].days for i in range(len(df))]
+        df['epi_week'] = df['epi_day']//7
 
-        temp_col = df['epi_day']
-        df.drop(columns=['epi_day'], inplace=True)
-        df.insert(loc=5, column='epi_day', value=temp_col)
+        temp_day = df['epi_day']
+        temp_week = df['epi_week']
+        df.drop(columns=['epi_day', 'epi_week'], inplace=True)
+        df.insert(loc=5, column='epi_week', value=temp_week)
+        df.insert(loc=5, column='epi_day', value=temp_day)
 
         df.drop(columns=['epi'], inplace=True)
 
@@ -127,7 +130,7 @@ rule add_days_since_epi:
 rule gisaid_remove_duplicates:
     input:
         fasta = config["gisaid_fasta"],
-        metadata = rules.add_days_since_epi.output.metadata,
+        metadata = rules.add_days_and_weeks_since_epi.output.metadata,
 #        fasta = rules.gisaid_unify_headers.output.fasta,
 #        metadata = rules.gisaid_add_previous_lineages.output.metadata
     output:
@@ -146,7 +149,7 @@ rule gisaid_remove_duplicates:
           --out-fasta {output.fasta} \
           --sample-size 1 \
           --out-metadata {output.metadata} \
-          --select-by-min-column 'epi_day' &> {log}
+          --select-by-min-column 'epi_week' &> {log}
         """
 
 #counts number of records by grouping on 'country' column
@@ -525,6 +528,7 @@ rule gisaid_output_all_matched_metadata:
                          genbank_accession \
                          date \
                          epi_day \
+                         epi_week \
                          region \
                          country \
                          division \
@@ -610,6 +614,7 @@ rule gisaid_output_global_matched_metadata:
                          genbank_accession \
                          date \
                          epi_day \
+                         epi_week \
                          region \
                          country \
                          division \
@@ -730,6 +735,7 @@ rule gisaid_get_collapsed_metadata:
                          genbank_accession \
                          date \
                          epi_day \
+                         epi_week \
                          region \
                          country \
                          division \
@@ -796,6 +802,7 @@ rule gisaid_get_collapsed_expanded_metadata:
                          genbank_accession \
                          date \
                          epi_day \
+                         epi_week \
                          region \
                          country \
                          division \
