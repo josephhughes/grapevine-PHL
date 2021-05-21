@@ -34,7 +34,7 @@ rule uk_add_pangolin_lineages_to_metadata:
           --in-data {input.lineages} \
           --index-column fasta_header \
           --join-on taxon \
-          --new-columns pango_lineage \
+          --new-columns lineage \
           --out-metadata {output.metadata} &>> {log}
         """
 
@@ -50,7 +50,7 @@ rule get_filled_analysis_instrument:
         df = pd.read_csv(input.metadata)
 
         df.loc[:,'sequence_length'] = df.loc[:,'length']
-        df.loc[:,'pango'] = df.loc[:,'pango_lineage']
+        df.loc[:,'pango'] = df.loc[:,'lineage']
 
         df = df.loc[:,['central_id', 'redcap_repeat_instance', \
                         'consensus', 'ave_depth', 'sequence_length', \
