@@ -1,6 +1,11 @@
 #todays_date = datetime.datetime.strptime(params.date, '%Y-%m-%d').date()
 #used if seq_rec.id in outgroups from just 'seq_rec',
 #as comparisons using a SeqRecord object aren't implemented
+#
+#doesn't filter outgroup sequences
+#should we be excluding sequences that are "too old"?
+#current window paramater is 180 days
+#might set to arbitrarily large number since we have a relatively low number of sequences
 rule filter_by_date:
     input:
         fasta = rules.uk_output_lineage_table.output.fasta,
@@ -28,26 +33,23 @@ rule filter_by_date:
                 except:
                     continue
                 line = outgroup_handle.readline()
-        print(outgroups)
-        
+                
 
         indexed_fasta = SeqIO.index(str(input.fasta), "fasta")
-        print(len(indexed_fasta))
-
+        
         window = datetime.timedelta(int(params.time_window))
         todays_date = datetime.datetime.strptime(str(datetime.date.today()), '%Y-%m-%d').date()
-        print(window, todays_date)
-
+        
         with open(str(input.metadata), 'r', newline = '') as csv_in, \
              open(str(output.fasta), "w") as fasta_out:
 
             reader = csv.DictReader(csv_in, delimiter=",", quotechar='\"', dialect = "unix")
 
             for row in reader:
-                if row["fasta_header"] not in indexed_fasta:
-                    print("%s not in fasta" %row["fasta_header"])
+                if row["strain"] not in indexed_fasta:
+                    print("%s not in fasta" %row["strain"])
                     continue
-                seq_rec = indexed_fasta[row["fasta_header"]]
+                seq_rec = indexed_fasta[row["strain"]]
                 if seq_rec.id in outgroups:
                     fasta_out.write(">" + seq_rec.id + "\n")
                     fasta_out.write(str(seq_rec.seq) + "\n")
@@ -64,6 +66,12 @@ rule filter_by_date:
                 fasta_out.write(">" + seq_rec.id + "\n")
                 fasta_out.write(str(seq_rec.seq) + "\n")
 
+
+#removes identical sequences from fastas
+#why would this not be done sooner?
+#hashmap would contain names of fastas for identical sequences
+#the sequence name kept appears arbitrary
+#outgroup fastas are retained
 rule cog_hash_seqs:
     input:
         fasta = rules.filter_by_date.output.fasta,
@@ -133,22 +141,23 @@ rule cog_hash_seqs:
                     metadata.write("|".join(value) + "\n")
 
 
+#where-column to match with gisaid metadata
 rule uk_output_hashed_lineage_table:
     input:
         fasta = rules.cog_hash_seqs.output.fasta,
-        metadata = rules.uk_output_lineage_table.output.metadata,
+        metadata = rules.uk_output_lineage_table.output.metadata
     output:
         fasta = temp(config["output_path"] + "/3/uk.hashed.temp.fasta"),
         metadata = config["output_path"] + "/3/uk.hashed.lineages.csv"
     log:
         config["output_path"] + "/logs/3_uk_output_hashed_lineage_table.log"
     shell:
-        """
-        fastafunk fetch \
+          """
+          fastafunk fetch \
           --in-fasta {input.fasta} \
           --in-metadata {input.metadata} \
-          --index-column fasta_header \
-          --filter-column fasta_header adm0 adm1 adm2 \
+          --index-column strain \
+          --filter-column strain country adm1 adm2 \
                           sample_date epi_week \
                           lineage uk_lineage \
           --out-fasta {output.fasta} \
@@ -156,12 +165,14 @@ rule uk_output_hashed_lineage_table:
           --log-file {log} \
           --low-memory \
           --restrict
-        """
+          """
 
-#removed where-column line in fastafunk fetch.
+
+#changed the where-column option a bit
 #input was originally config["GISAID_background_fasta"] and
 #config["GISAID_background_metadata"].
 #not sure what is meant by 'background' data.
+#uk_lineage column doesn't exist in gisaid data
 rule gisaid_output_lineage_table:
     input:
         fasta = rules.gisaid_output_all_matched_metadata.output.fasta,
@@ -177,9 +188,10 @@ rule gisaid_output_lineage_table:
           --in-fasta {input.fasta} \
           --in-metadata {input.metadata} \
           --index-column strain \
-          --filter-column strain country division location \
-                          date epi_day \
+          --filter-column strain country adm1 adm2 \
+                          sample_date epi_week \
                           lineage uk_lineage \
+          --where-column adm1=division adm2=location sample_date=date \
           --out-fasta {output.fasta} \
           --out-metadata {output.metadata} \
           --log-file {log} \
@@ -188,32 +200,16 @@ rule gisaid_output_lineage_table:
         """
 
 
-rule add_strain_to_RC_metadata:
-    input:
-        metadata = rules.uk_output_hashed_lineage_table.output.metadata
-    output:
-        metadata = config["output_path"] + "/3/RC_metadata.lineages.strain.csv"
-    run:
-        import pandas as pd
-
-        df = pd.read_csv(input.metadata)
-
-        strain = []
-
-        for i,row in df.iterrows():
-            strain.append(row["fasta_header"].split("|")[0])
-
-        df['strain'] = strain
-        df.to_csv(output.metadata)
-
-
+#previous stage define but not used
+#uses hashed fastas
+#passed to split_by_lineages
 rule combine_gisaid_and_cog:
     input:
         previous_stage = config["output_path"] + "/logs/2_summarize_pangolin_lineage_typing.log",
         gisaid_fasta = rules.gisaid_output_lineage_table.output.fasta,
         gisaid_metadata = rules.gisaid_output_lineage_table.output.metadata,
         uk_fasta = rules.cog_hash_seqs.output.fasta,
-        uk_metadata = rules.add_strain_to_RC_metadata.output.metadata
+        uk_metadata = rules.uk_output_hashed_lineage_table.output.metadata
     output:
         fasta = config["output_path"] + "/3/cog_gisaid.fasta",
         metadata = config["output_path"] + "/3/cog_gisaid.lineages.csv"
@@ -232,13 +228,15 @@ rule combine_gisaid_and_cog:
         """
 
 
+#previous stage define but not used
+#uses unhashed fastas
 rule combine_gisaid_and_cog_expanded:
     input:
         previous_stage = config["output_path"] + "/logs/2_summarize_pangolin_lineage_typing.log",
         gisaid_fasta = rules.gisaid_output_lineage_table.output.fasta,
         gisaid_metadata = rules.gisaid_output_lineage_table.output.metadata,
         uk_fasta = rules.uk_output_lineage_table.output.fasta,
-        uk_metadata = rules.add_strain_to_RC_metadata.output.metadata
+        uk_metadata = rules.uk_output_hashed_lineage_table.output.metadata
     output:
         fasta = config["output_path"] + "/3/cog_gisaid.expanded.fasta",
         metadata = config["output_path"] + "/3/cog_gisaid.lineages.expanded.csv"
@@ -255,6 +253,7 @@ rule combine_gisaid_and_cog_expanded:
           --low-memory \
           --log-file {log}
         """
+
 
 #removed the following echo lines:
 #        echo '{{"text":"' > {params.json_path}/3_data.json

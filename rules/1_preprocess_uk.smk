@@ -1,112 +1,29 @@
-import pandas as pd
-from Bio import SeqIO
-import redcap
-import math
-import datetime
-
-#for formatting fasta record names
-#not currently necessary
-#rule uk_strip_header_digits:
-#    input:
-#        fasta = config["latest_uk_fasta"],
-#    output:
-#        fasta = config["output_path"] + "/1/uk_latest.headerstripped.fasta",
-#    log:
-#        config["output_path"] + "/logs/1_uk_strip_header_digits.log"
-#    run:
-#        fasta_in = SeqIO.parse(str(input.fasta), "fasta")
-#        with open(str(output.fasta), 'w') as f:
-#            for record in fasta_in:
-#                ID = record.description.split("|")[0]
-#                f.write(">" + ID + "\n")
-#                f.write(str(record.seq) + "\n")
-
+import os
 
 rule get_redcap_metadata:
     input:
         redcap_db = config["redcap_access"]
+    params:
+        script = os.path.join(workflow.current_basedir, "../utilities/get_redcap_metadata.py")
     output:
-        metadata = config["output_path"] + "/1/redcap_metadata.csv",
-    run:
-        date_format = "%Y-%m-%d"
-        today = pd.to_datetime(datetime.datetime.today().strftime(date_format))
+        metadata = config["output_path"] + "/1/redcap_metadata.csv"
+    log:
+        config["output_path"] + "/logs/1_get_redcap_metadata.log"
+    shell:
+        """
+        python {params.script} {input.redcap_db} {output.metadata} &> {log}
+        """
 
-        with open(input.redcap_db, 'r') as f:
-            read_file = f.read().strip('\n')
-            url = read_file.split(',')[0]
-            key = read_file.split(',')[1]
-        f.close()
-
-        proj = redcap.Project(url, key)
-        proj_df = proj.export_records(format='df', forms=['case','analysis'])
-
-        #first filter out rows without consensus
-        for i in set(proj_df.index):
-            if type(proj_df.consensus[i]) == float: #a lone row not containing a fasta will be filtered
-                proj_df.drop(i, inplace=True)
-                continue
-            if not any(~proj_df.consensus[i].isna()): #IDs containing no fastas will be filtered
-                proj_df.drop(i, inplace=True)
-
-        #set multiindex to create unique keys
-        proj_df.set_index(['redcap_repeat_instrument', 'redcap_repeat_instance'], append=True, inplace=True)
-
-        #filter repeat instances with no dates
-        #loop through central IDs
-        for i in proj_df.index.levels[0]:
-            temp_df = proj_df.loc[(i,slice(None),slice(None)),:]
-            temp_index = set(temp_df.index.get_level_values('redcap_repeat_instance'))
-            #loop through repeat instances
-            for j in temp_index:
-                dates_df = proj_df.loc[(i,'case',j),:]
-                if not any(~dates_df[['date_collected', 'date_received']].isna()): #if both date columns are NaN
-                    proj_df.drop(proj_df.loc[(i,slice(None),j),:].index, inplace=True) #drop case and analysis repeat instance
-
-        #filter repeat instances based on date
-        #loop through central IDs
-        for i in proj_df.index.levels[0]:
-            temp_df = proj_df.loc[(i,slice(None),slice(None)),:]
-            temp_index = set(temp_df.index.get_level_values('redcap_repeat_instance'))
-            #check if there are repeat instances to filter
-            if len(temp_index) > 1:
-                delta_max = datetime.timedelta(days=0) #initial timedelta
-                inst_to_keep = 1
-                for j in temp_index:
-                    rep_inst_df = proj_df.loc[(i,'case',j),:]
-                    if math.isnan(rep_inst_df['date_collected']): #if date_collected is NaN, then date_received is used
-                        date = pd.to_datetime(rep_inst_df['date_received'], format=date_format)
-                        new_delta = today-date
-                        if new_delta>delta_max: #if date of repeat is older, it will be kept
-                            delta_max = new_delta
-                            inst_to_keep = j
-                    else:
-                        date = pd.to_datetime(rep_inst_df['date_collected'], format=date_format)
-                        new_delta = today-date
-                        if new_delta>delta_max: #if date of repeat is older, it will be kept
-                            delta_max = new_delta
-                            inst_to_keep = j
-                for j in temp_index: #loop through repeat instances and drop rows that aren't the instance to keep
-                    if j == inst_to_keep:
-                        continue
-                    else:
-                        proj_df.drop(proj_df.loc[(i,slice(None),j),:].index, inplace=True) #drop case and analysis repeat instance
-
-        #split dataframe into case and analysis instruments and remove repeat_instrument columns
-        case_df = proj_df.loc[(slice(None),'case',slice(None)),:'case_complete'].droplevel('redcap_repeat_instrument')
-        analysis_df = proj_df.loc[(slice(None),'analysis',slice(None)),'consensus':].droplevel('redcap_repeat_instrument')
-        #merge into new dataframe such that case and analysis info is on one row
-        merged_df = case_df.join(analysis_df)
-        merged_df.to_csv(output.metadata, sep=',')
-
-
-#might want to do this after fetching metadata since that may filter out fastas
 rule get_redcap_fasta:
     input:
         redcap_db = config["redcap_access"],
         metadata = rules.get_redcap_metadata.output.metadata,
     output:
-        fasta = config["output_path"] + "/1/redcap_fasta.fa",
+        fasta = config["output_path"] + "/1/redcap_fasta.fasta",
     run:
+        import redcap
+        import pandas as pd
+
         with open(input.redcap_db, 'r') as f:
             read_file = f.read().strip('\n')
             url = read_file.split(',')[0]
@@ -124,22 +41,46 @@ rule get_redcap_fasta:
         f.close()
 
 
-rule add_fasta_header:
+#for formatting fasta record names
+rule format_RC_fasta_header:
+    input:
+        fasta = rules.get_redcap_fasta.output.fasta
+    output:
+        fasta = config["output_path"] + "/1/RC_formatted.fasta"
+    log:
+        config["output_path"] + "/logs/1_uk_strip_header_digits.log"
+    run:
+        from Bio import SeqIO
+        
+        fasta_in = SeqIO.parse(str(input.fasta), "fasta")
+        with open(str(output.fasta), 'w') as f:
+            for record in fasta_in:
+                new_header = record.id.split("|")[0]
+                f.write(">" + new_header + "\n")
+                f.write(str(record.seq) + "\n")
+
+        f.close()
+
+
+rule add_strain:
     input:
         metadata = rules.get_redcap_metadata.output.metadata,
-        fasta = rules.get_redcap_fasta.output.fasta,
+        fasta = rules.format_RC_fasta_header.output.fasta
     output:
-        metadata = config["output_path"] + "/1/RC_metadata.fasta_header.csv",
+        metadata = config["output_path"] + "/1/RC_metadata.strain.csv"
     run:
+        import pandas as pd
+        from Bio import SeqIO
+        
         df = pd.read_csv(input.metadata)
 
-        fasta_header = []
+        strain = []
 
         fasta_in = SeqIO.parse(str(input.fasta), "fasta")
         for record in fasta_in:
-            fasta_header.append(record.description)
+            strain.append(record.description)
 
-        df['fasta_header'] = fasta_header
+        df['strain'] = strain
         df.to_csv(output.metadata, index=False, sep=",")
 
 
@@ -147,13 +88,15 @@ rule add_fasta_header:
 #originally took config["latest_uk_metadata"] as input
 rule add_sample_date:
     input:
-        metadata = rules.add_fasta_header.output.metadata,
+        metadata = rules.add_strain.output.metadata,
     output:
-        metadata = config["output_path"] + "/1/RC_metadata.fasta_header.sample_date.csv",
+        metadata = config["output_path"] + "/1/RC_metadata.strain.sample_date.csv",
     log:
         config["output_path"] + "/logs/1_uk_add_sample_date.log"
     resources: mem_per_cpu=20000
     run:
+        import pandas as pd
+
         df = pd.read_csv(input.metadata)
 
         sample_date = []
@@ -276,7 +219,7 @@ rule add_sample_date:
 #annotate adds length, missing and gaps columns
 rule annotate_to_remove_duplicates:
     input:
-        fasta = rules.get_redcap_fasta.output.fasta,
+        fasta = rules.format_RC_fasta_header.output.fasta,
         metadata = rules.add_sample_date.output.metadata,
     output:
         metadata = config["output_path"] + "/1/uk_latest.add_sample_date.add_sequence_name.accessions.annotated.csv"
@@ -290,13 +233,39 @@ rule annotate_to_remove_duplicates:
           --in-metadata {input.metadata} \
           --out-metadata {output.metadata} \
           --log-file {log} \
-          --index-column fasta_header &> {log}
+          --index-column strain &> {log}
         """
           # --add-cov-id \
 
 
+rule add_coverage_column:
+    input:
+        fasta = rules.format_RC_fasta_header.output.fasta,
+        metadata = rules.annotate_to_remove_duplicates.output.metadata
+    output:
+        metadata = config["output_path"] + "/1/uk_latest.add_sample_date.add_sequence_name.accessions.annotated.covg.csv"
+    run:
+        import pandas as pd
+        from Bio import SeqIO
+
+        df = pd.read_csv(input.metadata)
+        coverage = []
+
+        record_dict = SeqIO.index(input.fasta, "fasta")
+
+        for record in df['strain']:
+            record_seq = str(record_dict[record].seq)
+            seq_sans_N = record_seq.replace("N", "")
+            coverage.append(float(len(seq_sans_N)) / len(record_seq))
+        
+        df['coverage'] = coverage
+
+        df.to_csv(output.metadata, index=False)
+
+
 #not sure under what conditions there would be duplicate local sample IDs
 #skip for now
+#add rule for deduplicating by gisaid_id between gisaid and redcap data
 #rule uk_remove_duplicates_COGID_by_gaps:
 #    input:
 #        fasta = rules.uk_strip_header_digits.output.fasta,
@@ -346,9 +315,9 @@ rule annotate_to_remove_duplicates:
 #previously took rules.uk_update_sample_dates.output.metadata as input
 rule add_epi_week:
     input:
-        metadata = rules.annotate_to_remove_duplicates.output.metadata
+        metadata = rules.add_coverage_column.output.metadata
     output:
-        metadata = config["output_path"] + "/1/uk_latest.add_header.annotated.deduplicated_cov_id.sample_date.updated_sample_date.epi_week.csv",
+        metadata = config["output_path"] + "/1/uk_latest.add_header.annotated.deduplicated_cov_id.sample_date.updated_sample_date.epi_week.csv"
     log:
         config["output_path"] + "/logs/1_uk_add_epi_week.log"
     resources: mem_per_cpu=20000
@@ -487,10 +456,31 @@ rule add_epi_week:
 #        """
 
 
+#filters fasta seqs by length
+#threshold set in config
+#current length threshold: 29000
+rule redcap_filter_by_length:
+    input:
+        fasta = rules.format_RC_fasta_header.output.fasta
+    params:
+        min_length = config["min_length"]
+    output:
+        fasta = config["output_path"] + "/1/redcap.RD.UH.filter_length.fasta"
+    log:
+        config["output_path"] + "/logs/redcap_filter_by_length.log"
+    shell:
+        """
+        datafunk filter_fasta_by_covg_and_length \
+          -i {input.fasta} \
+          -o {output} \
+          --min-length {params.min_length} &> {log}
+        """
+
+
 #originally took rules.uk_unify_headers.output.fasta as input
 rule uk_minimap2_to_reference:
     input:
-        fasta = rules.get_redcap_fasta.output.fasta,
+        fasta = rules.redcap_filter_by_length.output.fasta,
         reference = config["reference_fasta"]
     output:
         sam = config["output_path"] + "/1/uk_latest.unify_headers.epi_week.deduplicated.mapped.sam"
@@ -524,14 +514,15 @@ rule uk_get_variants:
         """
 
 
-#        datafunk sam_2_fasta \
-#          -s {input.sam} \
-#          -r {input.reference} \
-#          -o {output.fasta} \
-#          -t [{params.trim_start}:{params.trim_end}] \
-#          --pad \
-#          --log-inserts \
-#          --log-deletions &> {log}
+#        gofasta sam toMultiAlign \
+#        -t {threads} \
+#        -s {input.sam} \
+#        -o {output.fasta} \
+#        --trim \
+#        --trimstart {params.trim_start} \
+#        --trimend {params.trim_end} \
+#        --pad &> {log}
+#
 #        mv insertions.txt {params.insertions}
 #        mv deletions.txt {params.deletions}
 #        cp {params.insertions} {output.insertions}
@@ -553,14 +544,14 @@ rule uk_remove_insertions_and_trim_and_pad:
         config["output_path"] + "/logs/1_uk_remove_insertions_and_trim_and_pad.log"
     shell:
         """
-        gofasta sam toMultiAlign \
-        -t {threads} \
-        -s {input.sam} \
-        -o {output.fasta} \
-        --trim \
-        --trimstart {params.trim_start} \
-        --trimend {params.trim_end} \
-        --pad &> {log}
+        datafunk sam_2_fasta \
+          -s {input.sam} \
+          -r {input.reference} \
+          -o {output.fasta} \
+          -t [{params.trim_start}:{params.trim_end}] \
+          --pad \
+          --log-inserts \
+          --log-deletions &> {log}
         """
 
 #mask file is currently same one used in gisaid preprocessing step
@@ -580,7 +571,7 @@ rule uk_mask_1:
           --mask-file \"{input.mask}\" 2> {log}
         """
 
-#should length be included as a parameter?
+
 rule uk_filter_low_coverage_sequences:
     input:
         fasta = rules.uk_mask_1.output.fasta
@@ -601,6 +592,7 @@ rule uk_filter_low_coverage_sequences:
 
 
 #will need to get omissions list
+#do we have or need one?
 rule uk_filter_omitted_sequences:
     input:
         fasta = rules.uk_filter_low_coverage_sequences.output.fasta,
@@ -637,6 +629,7 @@ rule uk_full_untrimmed_alignment:
         """
 
 
+#using the same mask file
 rule uk_mask_2:
     input:
         fasta = rules.uk_full_untrimmed_alignment.output.fasta,
@@ -664,6 +657,8 @@ rule uk_get_unmasked_alignment:
     log:
         config["output_path"] + "/logs/1_uk_get_unmasked_alignment.log"
     run:
+        from Bio import SeqIO
+
         fasta_template = SeqIO.index(str(input.fasta_template), "fasta")
         fasta_in = SeqIO.index(str(input.fasta), "fasta")
 
@@ -703,7 +698,7 @@ rule add_AA_finder_result_to_metadata:
         fastafunk add_columns \
           --in-metadata {input.metadata} \
           --in-data {input.new_data} \
-          --index-column fasta_header \
+          --index-column strain \
           --join-on sequence_name \
           --new-columns $columns \
           --out-metadata {output.metadata} &>> {log}
@@ -727,6 +722,7 @@ rule uk_del_finder:
         """
 
 
+#dels defined but not used?
 rule uk_add_del_finder_result_to_metadata:
     input:
         dels = config["dels"],
@@ -742,7 +738,7 @@ rule uk_add_del_finder_result_to_metadata:
         fastafunk add_columns \
           --in-metadata {input.metadata} \
           --in-data {input.new_data} \
-          --index-column fasta_header \
+          --index-column strain \
           --join-on sequence_name \
           --new-columns $columns \
           --out-metadata {output.metadata} &>> {log}
@@ -798,6 +794,9 @@ rule uk_extract_lineageless:
         config["output_path"] + "/logs/1_extract_lineageless.log"
     resources: mem_per_cpu=20000
     run:
+        from Bio import SeqIO
+        import pandas as pd
+
         fasta_in = SeqIO.index(str(input.fasta), "fasta")
         df = pd.read_csv(input.metadata)
 
@@ -806,7 +805,7 @@ rule uk_extract_lineageless:
         with open(str(output.fasta), 'w') as fasta_out:
             for i,row in df.iterrows():
                 if pd.isnull(row['pango']):
-                    sequence_name = row['fasta_header']
+                    sequence_name = row['strain']
                     if sequence_name in fasta_in:
                         if sequence_name not in sequence_record:
                             record = fasta_in[sequence_name]
@@ -831,6 +830,9 @@ rule uk_add_dups_to_lineageless:
         config["output_path"] + "/logs/1_uk_add_dups_to_lineageless.log"
     resources: mem_per_cpu=20000
     run:
+        from Bio import SeqIO
+        import pandas as pd
+
         master_fasta_in = SeqIO.index(str(input.master_fasta), "fasta")
 
         df = pd.read_csv(input.metadata)
@@ -866,7 +868,7 @@ rule uk_add_dups_to_lineageless:
         #             dup_record.add(l)
 
         for i,row in df.iterrows():
-            if row["fasta_header"] in dup_record:
+            if row["strain"] in dup_record:
                 if row["sequence_name"] in lineageless_sequence_record:
                     continue
                 if row["sequence_name"] in master_fasta_in:
@@ -894,7 +896,7 @@ rule uk_add_dups_to_lineageless:
 #        curl -X POST -H "Content-type: application/json" -d @{params.json_path}/1_data.json {params.grapevine_webhook}
 rule summarize_preprocess_uk:
     input:
-        raw_fasta = rules.get_redcap_fasta.output.fasta,
+        raw_fasta = rules.format_RC_fasta_header.output.fasta,
         #deduplicated_fasta_by_covid = rules.uk_remove_duplicates_COGID_by_gaps.output.fasta,
         #deduplicated_fasta_by_biosampleid = rules.uk_remove_duplicates_biosamplesourceid_by_date.output.fasta,
         #deduplicated_fasta_by_rootbiosample = rules.uk_remove_duplicates_root_biosample_by_gaps.output.fasta,

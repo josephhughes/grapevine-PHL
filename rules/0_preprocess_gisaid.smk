@@ -62,7 +62,6 @@
 #        df.to_csv(output.metadata, index=False, sep = ",")
 
 
-
 #in-data and in-metadata are assumed csv apparently
 #index-column in metadata is shared by data
 #join-on refers to column in data shared by metadata
@@ -88,12 +87,45 @@
 #        """
 
 
+#reads metadata and fasta for lineage outgroups
+#required for rerooting in treebuilding step
+#will be removed in later rule if duplicate exists
+rule add_gisaid_outgroups:
+    input:
+        metadata = config["gisaid_meta"],
+        fasta = config["gisaid_fasta"],
+        outgroups_metadata = config["outgroups_metadata"],
+        outgroups_fasta = config["outgroups_fasta"]
+    output:
+        metadata = config["output_path"] + "/0/gisaid.with_outgroups.csv",
+        fasta = config["output_path"] + "/0/gisaid.with_outgroups.fasta"
+    run:
+        import pandas as pd
+        from Bio import SeqIO
+
+        gisaid_meta_df = pd.read_csv(input.metadata, sep="\t")
+        outgroup_meta_df = pd.read_csv(input.outgroups_metadata, sep="\t")
+
+        combine = [gisaid_meta_df, outgroup_meta_df]
+        combine_df = pd.concat(combine)
+        combine_df.to_csv(output.metadata, index=False, sep = ",")
+
+        fastas = [input.fasta, input.outgroups_fasta]
+
+        with open((output.fasta), 'w') as out_handle:
+            for fasta in fastas:
+                for record in SeqIO.parse(fasta, "fasta"):
+                    SeqIO.write(record, out_handle, "fasta")
+        out_handle.close()
+
 
 #gets difference between value in 'date' column and current date
 #returns number of days which is added as a new column
+#there is a datafunk/fastafunk function which does the same thing...
+#change later
 rule add_days_and_weeks_since_epi:
     input:
-        metadata = config["gisaid_meta"],
+        metadata = rules.add_gisaid_outgroups.output.metadata
     output:
         metadata = config["output_path"] + "/0/gisaid.UH.epi_day.csv"
     run:
@@ -102,7 +134,7 @@ rule add_days_and_weeks_since_epi:
 
         date_format = "%Y-%m-%d"
 
-        df = pd.read_csv(input.metadata, sep="\t")
+        df = pd.read_csv(input.metadata)
 
         df['date'] = pd.to_datetime(df['date'], format= date_format)
         df['epi'] = pd.to_datetime('2019-12-22', format= date_format)
@@ -121,15 +153,15 @@ rule add_days_and_weeks_since_epi:
         df.to_csv(output.metadata, index=False, sep = ",")
 
 
-
-#groups together by sequence name and then takes one from each group
-#effectively removing duplicates
-#assumes records sharing sequence name are exactly the same?
+#groups together by sequence name and then takes one from each group,
+#removing duplicates
+#is it possible for fasta sequences with identical names to have non-identical sequences?
 #note that 'sequence_name' column is now 'strain'
 #of duplicates, most recent sequence is kept, given by 'select-by-min'
+#when deduplicating redcap by date, the oldest is kept...
 rule gisaid_remove_duplicates:
     input:
-        fasta = config["gisaid_fasta"],
+        fasta = rules.add_gisaid_outgroups.output.fasta,
         metadata = rules.add_days_and_weeks_since_epi.output.metadata,
 #        fasta = rules.gisaid_unify_headers.output.fasta,
 #        metadata = rules.gisaid_add_previous_lineages.output.metadata
@@ -151,6 +183,7 @@ rule gisaid_remove_duplicates:
           --out-metadata {output.metadata} \
           --select-by-min-column 'epi_week' &> {log}
         """
+
 
 #counts number of records by grouping on 'country' column
 #was previously 'edin_admin_0' column
@@ -193,7 +226,7 @@ rule gisaid_filter_1:
           --min-length {params.min_length} &> {log}
         """
 
-#priority
+
 rule gisaid_minimap2_to_reference:
     input:
         fasta = rules.gisaid_filter_1.output.fasta,
@@ -207,6 +240,7 @@ rule gisaid_minimap2_to_reference:
         """
         minimap2 -t8 -a -x asm5 {input.reference} {input.fasta} -o {output} &> {log}
         """
+
 
 #head line gets column names
 #tail line gets lines (except for column names) containing 'Philippines'
@@ -233,8 +267,8 @@ rule gisaid_get_variants:
         tail -n+2 {output.variants} | grep -v -E "^Philippines" >> {output.global_variants}
         """
 
-#insertions and deletions are found in the output path but aren't generated from the pipeline?
-#don't appear to be used anyway
+
+#insertion and deletion params are found but don't appear to be used?
 rule gisaid_remove_insertions_and_pad:
     input:
         sam = rules.gisaid_minimap2_to_reference.output.sam,
@@ -253,6 +287,7 @@ rule gisaid_remove_insertions_and_pad:
         """
         gofasta sam toMultiAlign -t {threads} -s {input.sam} -o {output.fasta} --trim --trimstart {params.trim_start} --trimend {params.trim_end} --pad &> {log}
         """
+
 
 #filters fasta seqs by coverage
 #threshold set in config
@@ -274,6 +309,7 @@ rule gisaid_filter_2:
           --min-covg {params.min_covg} &> {log}
         """
 
+
 #current config only masks one position: 11083
 rule gisaid_mask:
     input:
@@ -289,6 +325,7 @@ rule gisaid_mask:
           --mask-file \"{input.mask}\"
         """
 
+
 # TODO: use Julia closest not Python here
 # rule gisaid_distance_to_WH04:
 #     input:
@@ -298,6 +335,7 @@ rule gisaid_mask:
 #     shell:
 #         """
 #         """
+
 
 #distance_to_root assumes column names in metadata for ommitting data
 #may need to make sure these columns are created later
@@ -319,6 +357,7 @@ rule gisaid_mask:
 #
 #        mv distances.tsv {output.table}
 #        """
+
 
 #skip for now
 #rule gisaid_filter_on_distance_to_WH04:
@@ -364,6 +403,7 @@ rule gisaid_AA_finder:
         datafunk AA_finder -i {input.fasta} --codons-file {input.AAs} --genotypes-table {output.found} &> {log}
         """
 
+
 #input snps defined but not used
 rule gisaid_add_AA_finder_result_to_metadata:
     input:
@@ -386,6 +426,7 @@ rule gisaid_add_AA_finder_result_to_metadata:
           --out-metadata {output.metadata} &>> {log}
         """
 
+
 #Would normally take fasta output from gisaid_filter_on_distance_to_WH04
 rule gisaid_extract_lineageless:
     input:
@@ -406,9 +447,9 @@ rule gisaid_extract_lineageless:
         sequence_record = []
 
         with open(str(output.fasta), 'w') as fasta_out:
-            if 'lineage' in df.columns:
+            if 'pango_lineage' in df.columns:
                 for i,row in df.iterrows():
-                    if pd.isnull(row['lineage']):
+                    if pd.isnull(row['pango_lineage']):
                         sequence_name = row['strain']
                         if sequence_name in fasta_in:
                             if sequence_name not in sequence_record:
@@ -459,10 +500,11 @@ rule gisaid_add_pangolin_lineages_to_metadata:
           --in-data {input.normal_lineages} \
           --index-column strain \
           --join-on taxon \
-          --new-columns lineage lineage_support lineages_version \
-          --where-column lineage_support=probability lineages_version=pangoLEARN_version \
+          --new-columns pango_lineage lineage_support lineages_version \
+          --where-column pango_lineage=lineage lineage_support=probability lineages_version=pangoLEARN_version \
           --out-metadata {output.metadata} &> {log}
         """
+
 
 #Would normally take output from gisaid_filter_on_distance_to_WH04
 rule gisaid_del_finder:
@@ -505,6 +547,7 @@ rule gisaid_add_del_finder_result_to_metadata:
         sed -i.bak '/Italy\/ABR-IZSGC-TE5166\/2020/s/,B.1.5,/,B.1,/g' {output.metadata} 2> {log}
         """
 
+
 #Would normally take output from gisaid_filter_on_distance_to_WH04
 rule gisaid_output_all_matched_metadata:
     input:
@@ -542,7 +585,6 @@ rule gisaid_output_all_matched_metadata:
                          age \
                          sex \
                          Nextstrain_clade \
-                         pango_lineage \
                          GISAID_clade \
                          originating_lab \
                          submitting_lab \
@@ -561,6 +603,7 @@ rule gisaid_output_all_matched_metadata:
                          lineage_support \
                          lineages_version \
                          del_1605_3 \
+          --where-column lineage=pango_lineage \
           --out-fasta {output.fasta} \
           --out-metadata {output.metadata} \
           --low-memory \
@@ -568,33 +611,12 @@ rule gisaid_output_all_matched_metadata:
           --restrict
         """
 
+
 #Would normally take fasta output from gisaid_filter_on_distance_to_WH04
-#not sure if this is necessary, might remove?
-rule gisaid_exclude_uk_seqs:
-    input:
-        fasta = rules.gisaid_mask.output.fasta,
-    output:
-        fasta = config["output_path"] + "/0/gisaid.global.fasta"
-    run:
-        from Bio import SeqIO
-
-        out_handle = open(str(output.fasta), 'w')
-        with open(str(input.fasta), 'r') as f:
-            for record in SeqIO.parse(f, 'fasta'):
-                id = record.id
-                seq = str(record.seq)
-                if id.split('/')[0] in ['England', 'Wales', 'Scotland', 'Northern_Ireland', 'NorthernIreland']:
-                    continue
-                else:
-                    out_handle.write('>' + id + '\n')
-                    out_handle.write(seq + '\n')
-
-        out_handle.close()
-
 #filter columns are retained
 rule gisaid_output_global_matched_metadata:
     input:
-        fasta = rules.gisaid_exclude_uk_seqs.output.fasta,
+        fasta = rules.gisaid_mask.output.fasta,
         metadata = rules.gisaid_add_del_finder_result_to_metadata.output.metadata
     output:
         fasta = temp(config["output_path"] + "/0/gisaid.global.temp.fasta"),
@@ -628,7 +650,6 @@ rule gisaid_output_global_matched_metadata:
                          age \
                          sex \
                          Nextstrain_clade \
-                         pango_lineage \
                          GISAID_clade \
                          originating_lab \
                          submitting_lab \
@@ -647,6 +668,7 @@ rule gisaid_output_global_matched_metadata:
                          lineage_support \
                          lineages_version \
                          del_1605_3 \
+          --where-column lineage=pango_lineage \
           --out-fasta {output.fasta} \
           --out-metadata {output.metadata} \
           --log-file {log} \
@@ -654,7 +676,9 @@ rule gisaid_output_global_matched_metadata:
           --restrict
         """
 
+
 #strips redundancy from sequences
+#equivalent to hash_seqs in rule_3?
 #requires julia and julialign
 #can't get julia to install
 #skipping for now
@@ -678,6 +702,7 @@ rule gisaid_output_global_matched_metadata:
 #            mv tip_to_redundants.csv {output.tip_to_redudants} &>> {log}
 #            mv redundant_to_tips.csv {output.redundant_to_tips} &>> {log}
 #        """
+
 
 #takes redundant to tips output from collapse rule
 #skipping for now
@@ -712,10 +737,11 @@ rule gisaid_output_global_matched_metadata:
 #                f_out.write(">" + record.id + "\n")
 #                f_out.write(str(record.seq) + "\n")
 
+
 #fasta input originally from collapsed output
 rule gisaid_get_collapsed_metadata:
     input:
-        fasta = rules.gisaid_exclude_uk_seqs.output.fasta,
+        fasta = rules.gisaid_mask.output.fasta,
         metadata = rules.gisaid_add_del_finder_result_to_metadata.output.metadata,
     output:
         fasta = temp(config["output_path"] + "/0/gisaid.global.collapsed.temp.fasta"),
@@ -749,7 +775,6 @@ rule gisaid_get_collapsed_metadata:
                          age \
                          sex \
                          Nextstrain_clade \
-                         pango_lineage \
                          GISAID_clade \
                          originating_lab \
                          submitting_lab \
@@ -768,6 +793,7 @@ rule gisaid_get_collapsed_metadata:
                          lineage_support \
                          lineages_version \
                          del_1605_3 \
+          --where-column lineage=pango_lineage \
           --out-fasta {output.fasta} \
           --out-metadata {output.metadata} \
           --log-file {log} \
@@ -775,12 +801,13 @@ rule gisaid_get_collapsed_metadata:
           --restrict
         """
 
+
 #fasta input originally from collapsed output
 #unique fasta input originally used in the cat line between input.collapsed and output.fasta
 #unique_fasta = rules.gisaid_get_unique_redundants.output.fasta,
 rule gisaid_get_collapsed_expanded_metadata:
     input:
-        collapsed_fasta = rules.gisaid_exclude_uk_seqs.output,
+        collapsed_fasta = rules.gisaid_mask.output,
         metadata = rules.gisaid_add_del_finder_result_to_metadata.output.metadata,
     output:
         fasta = config["output_path"] + "/0/gisaid.global.collapsed.unique_expanded.fasta",
@@ -816,7 +843,6 @@ rule gisaid_get_collapsed_expanded_metadata:
                          age \
                          sex \
                          Nextstrain_clade \
-                         pango_lineage \
                          GISAID_clade \
                          originating_lab \
                          submitting_lab \
@@ -835,6 +861,7 @@ rule gisaid_get_collapsed_expanded_metadata:
                          lineage_support \
                          lineages_version \
                          del_1605_3 \
+          --where-column lineage=pango_lineage \
           --out-fasta {output.fasta} \
           --out-metadata {output.metadata} \
           --low-memory \
@@ -869,11 +896,10 @@ rule check_root_pangolin_lineages:
                     f.write(row["strain"] + "\t" + row["lineage"] + "\n")
 
 
-
-
 #cp {input.counts} {params.published_counts} <- was causing issues
 #commenting out doesn't work, need to remove?
 #for all removed 'echo' lines, see previous version of rule 0 file
+#echo "Number of non-UK sequences: $(cat {input.global_fasta} | grep '>' | wc -l)\\n" >> {log}
 rule summarize_preprocess_gisaid:
     input:
         latest_fasta = rules.gisaid_remove_duplicates.input.fasta,
@@ -884,7 +910,7 @@ rule summarize_preprocess_gisaid:
         #removed_distance_to_root_fasta = rules.gisaid_filter_on_distance_to_WH04.output.fasta,
         all_fasta = rules.gisaid_output_all_matched_metadata.output.fasta,
         all_metadata = rules.gisaid_output_all_matched_metadata.output.metadata,
-        global_fasta = rules.gisaid_exclude_uk_seqs.output.fasta,
+        #global_fasta = rules.gisaid_exclude_uk_seqs.output.fasta,
         global_metadata = rules.gisaid_output_global_matched_metadata.output.metadata,
         #collapsed_fasta = rules.gisaid_collapse.output.fasta,
         collapsed_metadata = rules.gisaid_get_collapsed_metadata.output.metadata,
@@ -914,7 +940,6 @@ rule summarize_preprocess_gisaid:
         echo "Number of sequence after deduplicating: $(cat {input.deduplicated_fasta} | grep '>' | wc -l)\\n" >> {log}
         echo "Number of sequences after removing sequences <29000bps: $(cat {input.removed_short_fasta} | grep '>' | wc -l)\\n" >> {log}
         echo "Number of sequences after mapping and removing those with <95% coverage: $(cat {input.removed_low_covg_fasta} | grep '>' | wc -l)\\n" >> {log}
-        echo "Number of non-UK sequences: $(cat {input.global_fasta} | grep '>' | wc -l)\\n" >> {log}
         echo "> \\n" >> {log}
         echo "pangolin lineages for roots: \\n"
         cat {input.root_lineages} >> {log}
