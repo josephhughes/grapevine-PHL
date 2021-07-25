@@ -9,8 +9,7 @@ for i,row in LINEAGES_df.iterrows():
 
 rule merge_and_create_new_uk_lineages:
     input:
-#        config["output_path"] + "/4/all_traits.csv"
-        "./temp_copies/all_traits.csv"
+        rules.add_lin_to_annotations.output.traits
     params:
         script = os.path.join(workflow.current_basedir, "../utilities/curate_lineages.py")
     output:
@@ -106,7 +105,7 @@ rule update_lineage_metadata:
           --in-data {input.updated_lineages} \
           --index-column strain \
           --join-on taxon \
-          --new-columns uk_lineage microreact_lineage \
+          --new-columns ph_lineage microreact_lineage \
           --out-metadata {output.all_metadata} &> {log}
         """
 
@@ -151,7 +150,7 @@ rule step_5_annotate_tree:
         """
         clusterfunk annotate_tips \
           --in-metadata {input.metadata} \
-          --trait-columns uk_lineage \
+          --trait-columns ph_lineage \
           --index-column strain \
           --input {input.tree} \
           --output {output.tree} &> {log}
@@ -195,6 +194,8 @@ rule dequote_tree:
         """
 
 
+#country info not in tips but that's because this pipeline was originally dealing with all UK countries
+#PH has only itself, so country info is unnecessary
 rule cut_out_trees:
     input:
         full_tree = rules.dequote_tree.output.tree,
@@ -208,13 +209,13 @@ rule cut_out_trees:
         """
         mkdir -p {output.outdir} 2> {log}
 
-        for FILE in {input.indir}/UK*.samples.txt
+        for FILE in {input.indir}/PH*.samples.txt
         do
-            UKLIN=`echo ${{FILE}} | rev | cut -d"/" -f1 | rev | cut -d"." -f1`
+            PHLIN=`echo ${{FILE}} | rev | cut -d"/" -f1 | rev | cut -d"." -f1`
             gotree prune -r \
                 -i {input.full_tree} \
                 --tipfile ${{FILE}} \
-                -o {output.outdir}/${{UKLIN}}.tree
+                -o {output.outdir}/${{PHLIN}}.tree
         done 2>> {log}
         """
 
@@ -237,13 +238,13 @@ rule phylotype_cut_trees:
 
         for FILE in {input.treedir}/*.tree
         do
-            UKLIN=`echo ${{FILE}} | rev | cut -d"/" -f1 | rev | cut -d"." -f1`
+            PHLIN=`echo ${{FILE}} | rev | cut -d"/" -f1 | rev | cut -d"." -f1`
             clusterfunk phylotype \
                 --threshold {params.threshold} \
-                --prefix ${{UKLIN}}_1 \
+                --prefix ${{PHLIN}}_1 \
                 --input ${{FILE}} \
                 --in-format newick \
-                --output {output.phylotypedir}/${{UKLIN}}.tree
+                --output {output.phylotypedir}/${{PHLIN}}.tree
         done 2>> {log}
         """
 

@@ -352,6 +352,29 @@ rule output_annotations:
         """
 
 
+#currently all_traits file will have an empty uk_lineage column
+#this will be replaced with ph_lineage for now
+#ph_lineage will be based on del_lineage column
+rule add_lin_to_annotations:
+    input:
+        traits = rules.output_annotations.output.traits
+    output:
+        traits = config["output_path"] + "/4/all_traits.ph_lin.csv"
+    log:
+        config["output_path"] + "/logs/4_add_lin_to_annotations.log"
+    run:
+        import pandas as pd
+
+        df = pd.read_csv(input.traits)
+
+        cluster_col = df['del_lineage']
+        cluster_col = ['PH'+x.split('_')[-1] if type(x) == str else float('nan') for x in cluster_col] #making list to fill out ph_lineage col, based on existing del_lineage col
+        df.rename(columns={'uk_lineage':'ph_lineage'}, inplace=True)
+        df['ph_lineage'] = cluster_col
+
+        df.to_csv(output.traits, index=False)
+
+
 #        echo '{{"text":"' > 4b_data.json
 #        echo "*Step 4: Construct and annotate {params.date} lineage trees completed*\\n" >> 4b_data.json
 #        cat {log} >> 4b_data.json

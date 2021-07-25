@@ -60,13 +60,12 @@ rule get_filled_analysis_instrument:
         df = pd.read_csv(input.metadata)
 
         df.loc[:,'sequence_length'] = df.loc[:,'length']
-#        df.loc[:,'pango'] = df.loc[:,'lineage']
         df.loc[:, 'gaps'] = df.loc[:, 'missing']
         df.loc[:, 'missing'] = df.loc[:, 'coverage']
 
         df = df.loc[:,['central_id', 'redcap_repeat_instance', \
                         'consensus', 'ave_depth', 'sequence_length', \
-                        'missing', 'gaps', 'pango', 'pango_version', \
+                        'missing', 'gaps', 'pango', 'lineage_support', 'pango_version', \
                         'ph_cluster', 'p323l', 'd614g', 'n439k', \
                         'del_1605_3', 'epi_week', 'analysis_complete']]
 
